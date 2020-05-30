@@ -1,0 +1,90 @@
+---
+# work only db1
+- name: get passwd jmxremote if non passwd dir
+  shell: "grep jmxremote {{ home_path }}/_local_conf/jmx/jmxremote.password | cut -d' ' -f2"
+  register: jmxremote
+  failed_when: jmxremote.rc != 1 and jmxremote.rc != 0
+
+- name: block only db1
+  block:
+  - name: insert tomcat-instance "{{ db_name }}"
+    postgresql_query:
+      db: "{{ db_name }}"
+      query: |
+        {% for item_app in groups['appservers'] %}
+             {% for tomcat in hostvars[item_app]['tomcats'] -%}
+             {% if tomcat.webapps is defined and ('allocator' in tomcat.webapps or 'app-core' in tomcat.webapps) -%}
+             {% if 'allocator' in tomcat.webapps -%}
+             {% set jmxport = tomcat.jmx_port -%}
+             {% set alias_app = 'aa' -%}
+             {% set context = 'allocator' -%}
+             {% endif -%}
+             {% if 'app-core' in tomcat.webapps -%}
+             {% set jmxport = tomcat.jmx_port -%}
+             {% set alias_app = item_app -%}
+             {% set context = 'app-core' -%}
+             {%- endif -%}
+             {%- endif -%}
+               insert into SYS_JMX_INSTANCE
+               (ID, VERSION, CREATE_TS, CREATED_BY, UPDATE_TS, UPDATED_BY, NODE_NAME, ADDRESS, LOGIN, PASSWORD)
+               select distinct '{{ (alias_app+ansible_date_time.iso8601_micro) | to_uuid }}'::uuid, 1, '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp,
+               'ansible.insert', '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp, null, '{{alias_app}}', '{{ item_app }}:{{ jmxport }}', 'jmxremote', '{{ jmxremote.stdout }}'
+               from SYS_JMX_INSTANCE a
+               where not exists (select 1 from SYS_JMX_INSTANCE b where b.NODE_NAME = '{{alias_app}}' and b.DELETE_TS is null );
+             {%- endfor -%}
+             {%- endfor -%}
+    become_user: postgres
+
+  - name: update sys_scheduled_task "{{ db_name }}"
+    postgresql_query:
+      db: "{{ db_name }}"
+      query: "update sys_scheduled_task set permitted_servers = 'app2:{{ main_port }}/app-core,app1:{{ main_port }}/app-core'; "
+    become_user: postgres
+
+  - name: System Settings "{{ db_name }}"
+    postgresql_query:
+      db: "{{ db_name }}"
+      query: |
+        insert into SYS_CONFIG
+        (ID, VERSION, CREATE_TS, CREATED_BY, UPDATE_TS, UPDATED_BY, NAME, VALUE)
+        values ('{{ (item.name+ansible_date_time.iso8601_micro) | to_uuid }}'::uuid, 1, '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp,
+                'ansible.insert', '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp, null, '{{ item.name }}', '{{ item.value }}')
+        ON CONFLICT (NAME)
+        DO
+        UPDATE
+        SET VALUE = '{{ item.value }}';
+    with_items:
+      - { 'name': "taxi.phoneFormat.active", 'value': "false" }
+      - { 'name': "taxi.booking.supportEmail", 'value': "sherlock-exceptions@haulmont.com" }
+      - { 'name': "taxi.invoicing.common.invoiceDocumentWsTokenPass", 'value': "{{ lookup ('password', 'length=10 chars=ascii_letters,digits') }}" }
+      - { 'name': "taxi.GoogleKeyConfiguration.useBusinessApiKey", 'value': "true" }
+      - { 'name': "taxi.GoogleKeyConfiguration.useBusinessApiKeyForMap", 'value': "true" }
+      - { 'name': "cuba.email.smtpHost", 'value': "{{ smtp.smtpHost | default('127.0.0.1') }}" }
+      - { 'name': "cuba.email.smtpPort", 'value': "{{ smtp.smtpPort | default('12345') }}" }
+      - { 'name': "cuba.email.smtpAuthRequired", 'value': "{{ smtp.smtpAuthRequired | default('true') }}" }
+      - { 'name': "cuba.email.smtpUser", 'value': "{{ smtp.smtpUser | default('test') }}" }
+      - { 'name': "cuba.email.smtpPassword", 'value': "{{ smtp.smtpPassword | default('test') }}" }
+      - { 'name': "cuba.email.smtpStarttlsEnable", 'value': "{{ smtp.smtpStarttlsEnable | default('false') }}" }
+      - { 'name': "cuba.email.fromAddress", 'value': "{{ smtp.fromaddress | default('noreply@mycompany.com') }}" }
+      - { 'name': "cuba.email.smtpConnectionTimeoutSec", 'value': "{{ smtp.smtpConnectionTimeoutSec | default('20') }}" }
+      - { 'name': "cuba.email.smtpTimeoutSec", 'value': "{{ smtp.smtpTimeoutSec | default('60') }}" }
+    become_user: postgres
+
+  - name: System Settings "{{ db_name }}" add AA_ALLOCATOR_INSTANCE
+    postgresql_query:
+      db: "{{ db_name }}"
+      query: |
+        insert into AA_ALLOCATOR_INSTANCE
+        (ID, VERSION, CREATE_TS, CREATED_BY, UPDATE_TS, UPDATED_BY, DELETE_TS, DELETED_BY, ROLE, SERVER_ID, DISPATCHER_LOCATION)
+        values ('{{ (item.name+ansible_date_time.iso8601_micro) | to_uuid }}'::uuid, 1, '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp,
+                'ansible.insert', '{{ ansible_date_time.date}} {{ ansible_date_time.time }}'::timestamp, null, null, 'PRIMARY', '{{ inventory_hostname }}:{{ tomcats | selectattr('name','equalto',ns.local_allocator_tomcat) | map (attribute='port') | list | first }}/allocator', '{{ inventory_hostname }}:{{ tomcats | selectattr('name','equalto',ns.local_allocator_tomcat) | map (attribute='port') | list | first }}/allocatorremoting')
+        ON CONFLICT (NAME)
+        DO
+        UPDATE
+        SET VALUE = '{{ item.value }}';
+    become_user: postgres
+    when: tag == 46
+
+  become_user: "{{ user_localhost.stdout }}"
+  when: inventory_hostname[db_master]
+  run_once: True

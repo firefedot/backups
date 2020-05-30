@@ -1,0 +1,30 @@
+---
+# install postgres, openjdk8
+- name: Add an Apt signing key
+  apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+
+- apt_repository:
+    repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_lsb.codename }}-pgdg main"
+    state: present
+#
+- name: Update repositories cache and install postgresql package
+  apt:
+    update_cache: yes
+    name:
+      - postgresql-9.6
+      - postgresql-contrib-9.6
+      - openjdk-8-jdk-headless
+    force_apt_get: yes
+
+- name: create user root root for cuba-tools
+  postgresql_user:
+    db: postgres
+    name: root
+    password: root
+    role_attr_flags: SUPERUSER
+    priv: ALL
+    state: present
+    encrypted: yes
+  become_user: postgres

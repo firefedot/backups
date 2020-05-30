@@ -1,0 +1,118 @@
+---
+# create new db
+
+# work only job lan network
+
+- name: name who run this
+  become: false
+  local_action: command whoami
+  register: user_localhost
+
+- debug: var=user_localhost
+
+- name: Block generate empty db from local machine
+  block:
+  - name: generate db localhost
+    shell: |
+      git clone git@git.haulmont.com:sherlock-src/extensions/{{ extension }}.git roles/createdb/files/{{ customer }}/ext -b {{ branch }}
+      git clone git@git.haulmont.com:sherlock-src/gradle-common.git roles/createdb/files/{{ customer }}/gradle-common -b {{ branch }}
+      cd roles/createdb/files/{{ customer }}/ext
+      export HAULMONT_REPOSITORY_USER=developer
+      export HAULMONT_REPOSITORY_PASSWORD=Haul
+      bash gradlew createDb -PdbHost=localhost:5432 -PdbName={{ customer }}_clean --refresh-dependencies
+
+
+  - name: dump  db
+    postgresql_db:
+      name: "{{ customer }}_clean"
+      login_user: "root"
+      login_host: "localhost"
+      login_password: "root"
+      state: dump
+      target: "roles/createdb/files/{{ customer }}/{{ customer }}-clean.backup"
+      target_opts: "-F c"
+
+  delegate_to: 127.0.0.1
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: True
+
+- name: block restore db on master node
+  block:
+  - name: "Checking _backup"
+    stat:
+      path: "{{ home_path }}/_backup"
+    register: folder_stats
+
+  - name: create _backup dir
+    file:
+      path: "{{ home_path }}/_backup"
+      state: directory
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+    when: folder_stats.stat.exists == false
+
+  - name: copy dump
+    copy:
+      src: "{{ customer }}/{{ customer }}-clean.backup"
+      dest: "{{ home_path }}/_backup/{{ customer }}.backup"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+
+  - name: Create db "{{ db_name }}"
+    postgresql_db:
+      name: "{{ db_name }}"
+      encoding: UTF-8
+      template: template0
+      owner: "{{ db_user }}"
+    become_user: postgres
+
+  # uncomment after create DB
+  - name: Adds  extensions {{ ansible_date_time.time }}
+    postgresql_ext:
+      name: "{{ item }}"
+      db: "{{ db_name }}"
+      login_host: "localhost"
+      login_user: "{{ db_user }}"
+    with_items:
+      - pg_buffercache
+      - pg_stat_statements
+    become_user: "{{ sherlock_user }}"
+
+  - name: collect facts for update time
+    setup:
+
+  - name: restore db {{ ansible_date_time.time }}
+    shell: "pg_restore -F c -h localhost -d {{ db_name }} {{ home_path }}/_backup/{{ customer }}.backup -U {{ db_user }} --no-owner -v"
+    become_user: "{{ sherlock_user }}"
+  when: db_master is defined
+
+#- name: restore db {{ ansible_date_time.time }}
+#  postgresql_db:
+#    name: "{{ db_name }}"
+#    login_user: "{{ db_user }}"
+#    login_host: "localhost"
+#    state: restore
+#    target: "{{ home_path }}/_local_conf/{{ customer }}.backup"
+#    target_opts: -F c --no-owner
+#  become_user: "{{ sherlock_user }}"
+#  when: db_master is defined
+
+- name: set time zone to db
+  postgresql_query:
+    db: "{{ db_name }}"
+    login_host: "localhost"
+    login_user: "{{ db_user }}"
+    query: "alter database {{ db_name }} set time zone '{{ customer_timezone | default(server_timezone) }}';"
+  become_user: "{{ sherlock_user }}"
+  when: db_master is defined
+
+- name: collect facts for update time
+  setup:
+
+- name: clear tmp files {{ ansible_date_time.time }}
+  file:
+    path: "roles/createdb/files/{{ customer }}"
+    state: absent
+  delegate_to: 127.0.0.1
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: True

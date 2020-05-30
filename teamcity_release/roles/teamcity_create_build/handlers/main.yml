@@ -1,0 +1,6 @@
+---
+- name: reload daemon systemd
+  systemd:
+    daemon_reload: yes
+  delegate_to: "{{ server_deploy_ip }}"
+  become: yes

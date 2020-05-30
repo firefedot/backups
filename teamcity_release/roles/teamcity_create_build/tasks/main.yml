@@ -1,0 +1,504 @@
+---
+#
+- name: name who run this
+  become: false
+  local_action: command whoami
+  register: user_localhost
+
+
+- include_vars:
+    file: "{{ servers_config }}"
+    name: servers_yaml
+
+- include_vars:
+    file: "{{ jnlp_config }}"
+    name: servers_jnlp
+
+- fail:
+    msg: "{{ vars['server_deploy_ip_'+inventory_hostname] }} this NOT docker server"
+  when: build_type == 'docker' and vars['server_deploy_ip_'+inventory_hostname] not in list_docker_servers
+
+# testing block
+- debug:
+    msg: >-
+      {% set ns = namespace(max_port = 8080) -%}
+      {% for item in servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ]|list|sort -%}
+      {% set port_i = servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ][ item ].tomcatPort -%}
+      {% if port_i|int > ns.max_port|int -%}
+      {% set ns.max_port = port_i -%}
+      {% endif -%}
+      {% endfor -%}
+      {% set ns.max_port = (ns.max_port|int + 1) -%}
+      {{ ns.max_port }}
+  register: new_main_port
+
+- set_fact:
+    port: '{{ new_main_port.msg|string }}'
+  when: mode == 'auto'
+
+- name: check port on server {{ vars['server_deploy_ip_'+inventory_hostname] }}
+  shell: |
+    grep -r 'Connector port="{{ vars['port_'+inventory_hostname] }}"' /home/tomcat7/*/conf/server.xml
+    grep -r 'Server port="{{ vars['shutdown_port_'+inventory_hostname] }}"' /home/tomcat7/*/conf/server.xml
+    grep -r 'jmxremote.port={{ vars['jmx_port_'+inventory_hostname] }}' /home/tomcat7/*/bin/setenv.sh
+    grep -r 'address={{ vars['debug_port_'+inventory_hostname] }}' /home/tomcat7/*/bin/setenv.sh
+    netstat -ntlup | egrep '{{ vars['port_'+inventory_hostname] }}|{{ vars['shutdown_port_'+inventory_hostname] }}|{{ vars['jmx_port_'+inventory_hostname] }}|{{ vars['debug_port_'+inventory_hostname] }}'
+  register: port_server
+  failed_when: port_server.rc != 1 and port_server.rc != 0
+#  when: build_type is search('default')
+
+
+- fail:
+    msg: "port is busy {{ port_server.stdout_lines }} on server"
+  when: port_server is defined and port_server.stdout_lines != []
+
+- fail:
+    msg: "{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %} is exists to {{ vars['server_deploy_ip_'+inventory_hostname] }} - servers.yaml"
+  with_items:
+    - "{{ servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ] | list }}"
+  when: item == build_name+'-'+tag_type{% if build_type is search('cluster') %}+'-cluster'{% endif %}
+
+- debug:
+    msg: >
+      {% for item in servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ] -%}
+      {% for ports in ['jmxRemotePort', 'dbgPort', 'shutdownPort', 'tomcatPort'] -%}
+      {% for this_ports in [vars['port_'+inventory_hostname], vars['jmx_port_'+inventory_hostname], vars['shutdown_port_'+inventory_hostname], vars['debug_port_'+inventory_hostname]] -%}
+      {% if servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ][ item ][ports] == this_ports -%}
+      {% if item.split('-')[0] != build_name %}
+      Port {{ this_ports }} is exist to server {{ vars['server_deploy_ip_'+inventory_hostname] }} {{ item.split('-')[0]}};
+      {% endif -%}
+      {% else -%}
+      {% endif -%}
+      {% endfor -%}
+      {% endfor -%}
+      {% endfor -%}
+  register: port_check
+
+- fail:
+    msg: "{{ port_check.msg }}"
+  when: not(port_check.msg == '\n')
+
+- debug:
+    msg: "{{ servers_jnlp | list }}"
+
+- debug:
+    msg: "{{build_name}} exist to testservers-jnlp-v2.json"
+  with_items:
+    - "{{ servers_jnlp| list }}"
+  when: item == build_name
+  register: jnlp_check
+
+- set_fact:
+    jnlp_check_filter: "{{ jnlp_check.results | selectattr('item','equalto',build_name) | map (attribute='msg') | list  }}"
+
+# fail if {{ build_name }}-{{ tag_type }}{% if build_type is search('cluster') %}-cluster{% endif %} exist
+- fail:
+    msg: "{{ build_name }}-{{ tag_type }}{% if build_type is search('cluster') %}-cluster{% endif %} exist to testservers-jnlp-v2.json"
+  with_items:
+    - "{{ servers_jnlp[build_name] | list }}"
+  when:
+    - jnlp_check_filter != []
+    - item == build_name+'-'+tag_type{% if build_type is search('cluster') %}+'-cluster'{% endif %}
+
+- debug:
+    msg: "{{ build_name }}-{{ tag_type }}{% if build_type is search('cluster') %}-cluster{% endif %} exist to testservers-jnlp-v2.json"
+  with_items:
+    - "{{ servers_jnlp[build_name] | list }}"
+  when:
+    - jnlp_check_filter != []
+    - item == build_name+'-'+tag_type{% if build_type is search('cluster') %}+'-cluster'{% endif %}
+  register: jnlp_check_tag
+
+- debug:
+    msg: "{{ jnlp_check_tag }}"
+
+- set_fact:
+    jnlp_check_tag_filter: ""
+  when:  jnlp_check_filter == []
+- set_fact:
+    jnlp_check_tag_filter: "{{ jnlp_check_tag.results | selectattr('item','equalto',build_name+'-'+tag_type) | map (attribute='msg') | list }}"
+  when:  jnlp_check_filter != [] and not(build_type is search('cluster'))
+- set_fact:
+    jnlp_check_tag_filter: "{{ jnlp_check_tag.results | selectattr('item','equalto',build_name+'-'+tag_type+'-cluster') | map (attribute='msg') | list }}"
+  when:  jnlp_check_filter != [] and build_type is search('cluster')
+
+- debug:
+    msg: "{{ jnlp_check_filter }} - {{ jnlp_check_tag_filter }}"
+
+- set_fact:
+    input_server: |2-
+          {% set ns = namespace(count=0) -%}
+          {%- for item in servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ] -%}
+          {%- if build_name in item and ns.count == 0 -%}
+          {%- set ns.count = (ns.count|int + 1) -%}
+          {%- for list in servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ][item] -%}
+          {{ list }}: "{{ servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ][item][list] }}"
+          {% endfor -%}
+          {%- endif -%}{%- endfor -%}
+  when: servers_yaml[ vars['server_deploy_ip_'+inventory_hostname] ]| list | join(',') is search(build_name) and individual == false
+
+#- fail:
+#    msg: "end tests {{ vars['port_'+inventory_hostname] }} {{ tag_teamcity }} {{ vars['debug_port_'+inventory_hostname] }} {{ project_id }}"
+################################################################################################################
+# block create new build in teamcity
+- name: run localhost for git
+  block:
+#    insert data into configs
+    - name: git pull build-agent-scripts
+      shell: "cd  {{ path_to_buildagent }} && git pull"
+      run_once: true
+
+    - name: insert new server to jnlp
+      lineinfile:
+        path: "{{ jnlp_config }}"
+        insertafter: "^{"
+        line: "{{ input_jnlp }}"
+      when: jnlp_check_filter == []
+      run_once: true
+
+    - name: insert add server to jnlp
+      lineinfile:
+        path: "{{ jnlp_config }}"
+        insertafter: '"{{ build_name }}":{'
+        line: "{{ input_tag_jnlp }}"
+      when:
+        - jnlp_check_tag_filter == []
+        - jnlp_check_filter != []
+      run_once: true
+
+    - name: insert new same server
+      lineinfile:
+        path: "{{ servers_config }}"
+        insertafter: "{{ vars['server_deploy_ip_'+inventory_hostname] }}:"
+        line: |2-
+            {{ input_server|trim }}
+      when: individual == false
+
+    - name: insert new individual server
+      lineinfile:
+        path: "{{ servers_config }}"
+        insertafter: "{{ vars['server_deploy_ip_'+inventory_hostname] }}:"
+        line: "{{ input_server }}"
+      when: individual == true
+#
+#    - fail:
+#        msg: "test insert cluster"
+    # commit and push changes
+    - name: git add,commit,push
+      shell: |
+        cd  {{ path_to_buildagent }}
+        git add {{ servers_file }} {{ jnlp_file }}
+        git commit -m "ansible autocommit - add {{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %} testserver #{{ deployment_ticket }}"
+        git push
+      register: pwd
+      run_once: true
+
+    - name: startBuildQueue Tools
+      uri:
+        url: https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildQueue
+        user: "{{ tc_login_user }}"
+        password: "{{ tc_login_password }}"
+        method: POST
+        body: "<build><buildType id='{{ item }}'/></build>"
+        force_basic_auth: yes
+        headers:
+          Content-Type: "application/xml"
+      with_items:
+        - "TaxiTestEnvironment_UpdateBuildAgentScripts"
+        - "SHERLOCK_Tools_UpdateTestEnvironmentConfigs"
+      run_once: true
+  delegate_to: localhost
+  become_user: "{{ user_localhost.stdout }}"
+
+- name: run localhost for teamcity
+  block:
+# begin teamcity block
+    - name: get all data
+      uri:
+        url: "https://teamcity-sherlock.haulmont.com/app/rest/buildTypes/"
+        user: "{{ tc_login_user }}"
+        password: "{{ tc_login_password }}"
+        method: GET
+        headers:
+          Content-Type: "application/xml"
+        force_basic_auth: yes
+        return_content: yes
+      register: find_all
+      ignore_errors: yes
+    - name: check existing {{project_id}}
+      uri:
+        url: "https://teamcity-sherlock.haulmont.com/app/rest/buildTypes/{{project_id}}"
+        user: "{{ tc_login_user }}"
+        password: "{{ tc_login_password }}"
+        method: GET
+        headers:
+          Content-Type: "application/xml"
+        force_basic_auth: yes
+        return_content: yes
+      register: find_project_id
+      ignore_errors: yes
+
+    - debug:
+        var: find_project_id
+    - set_fact:
+        find_project_id_xml: "{{find_project_id.content}}" #"{{ find_project_id | map (attribute='content') | list }}"
+        find_all_xml: "{{find_all.content}}"
+    - debug:
+        msg: "{{find_project_id.content}}"
+
+    - name: block new build
+      block:
+      - name: create new build {{project_name}}
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/projects/id:{{ parentid }}/buildTypes'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: POST
+          body: "<newBuildTypeDescription name='{{ project_name }}' id='{{ project_id }}'/>"
+          force_basic_auth: yes
+          headers:
+            Content-Type: "application/xml"
+      when: find_project_id_xml is search('No build type or template is found by id')
+
+    - name: block if build exist
+      block:
+      - name: get uri dependencies
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/artifact-dependencies'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: GET
+          headers:
+            Content-Type: "application/xml"
+          force_basic_auth: yes
+          return_content: yes
+        register: get_uri
+
+      - set_fact:
+          get_uri_xml: "{{get_uri.content}}" #"{{ get_uri.results | map (attribute='content') | list }}"
+
+      - name: uri template
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/template'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: PUT
+          body: "TaxiTestEnvironment_DeployBranch44autocfg"
+          force_basic_auth: yes
+          headers:
+            Content-Type: "text/plain"
+# {% if build_type == 'docker' %}Docker{% elif build_type == 'default-cluster' %}Cluster{% else %}{% endif %}
+      - set_fact:
+          dop_qb: "{% if find_all_xml|lower is search(('SHERLOCK_Quickbooker_Release'+tag+'_'+build_name+tag)|lower) %}{{ build_name }}{% else %}Demo{% endif %}"
+          dop_dp: "{% if find_all_xml|lower is search(('SHERLOCK_DriverPortal_Release'+tag+'_DriverPortal'+build_name)|lower) %}{{ build_name }}{% else %}{% endif %}"
+          dop_wp: "{% if find_all_xml|lower is search(('SHERLOCK_WebPortal2_Release'+tag+'_Portal'+build_name)|lower) %}{{ build_name }}{% else %}{% if tag == '45' or tag_type == 'stable' %}{% else %}Demo{% endif %}{% endif %}"
+          dop_kiosk: "{% if find_all_xml|lower is search(('SHERLOCK_Kiosk_Kiosk'+tag+build_name)|lower) %}{{ build_name }}{% else %}{% endif %}"
+
+      - debug:
+          msg: '{{ dop_qb }} {{dop_dp }} {{ dop_wp }} {{ dop_kiosk }}'
+
+      - name: uri add artifact-dependencies
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/artifact-dependencies'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: POST
+          body: '<artifact-dependency id="0" type="artifact_dependency"> \
+                 <properties> \
+                 <property name="cleanDestinationDirectory" value="false"/> \
+                 <property name="pathRules" value="{{ item.artifact }}.zip!**=>{{ item.artifact_value }}"/> \
+                 <property name="revisionName" value="lastSuccessful"/> \
+                 <property name="revisionValue" value="latest.lastSuccessful"/> \
+                 </properties> \
+                 <source-buildType id="{{ item.id_depend }}"
+                 name="{{ item.name_depend }}"
+                 href="/httpAuth/app/rest/buildTypes/id:{{ item.id_depend }}"
+                 projectName="{{ item.projectName_depend }}" projectId="{{ item.projectId_depend }}"
+                 webUrl="https://teamcity-sherlock.haulmont.com/viewType.html?buildTypeId={{ item.id_depend }}"/> \
+                 </artifact-dependency>'
+          headers:
+            Content-Type: "application/xml"
+          force_basic_auth: yes
+        with_items:
+          - {id_depend: "SHERLOCK_Kiosk_{% if tag == '45' %}Kiosk{{ tag }}{% elif tag_type == 'stable' %}{{ tag_type|title }}_KioskDemo{% else %}Release{{ tag }}_Kiosk{% endif %}{{ dop_kiosk }}", name_depend: "Kiosk{% if tag == '45' %} {{ tag }}{% else %}{% endif %} {{ dop_kiosk }}", artifact: "kiosk", artifact_value: "kiosk", projectId_depend: "SHERLOCK_Kiosk{% if tag != '45' and tag_type != 'stable' %}{% else %}_Release{{ tag }}{% endif %}", projectName_depend: "Sherlock / Kiosk{% if tag == '45' %}{% elif tag_type == 'stable' %} {{ tag }}{% else %} Release {{ tag }}{% endif %}" }
+          - {id_depend: "SHERLOCK_WebPortal2_{% if tag_type == 'stable' %}{{tag|title }}{% else %}Release{{ tag }}{% endif %}_Portal{{ dop_wp }}", name_depend: "Portal {{ dop_wp }}", artifact: "{% if dop_wp %}portal-{{ dop_wp|lower }}{% else %}portal{% endif %}", artifact_value: "portal", projectId_depend: "SHERLOCK_WebPortal2_{% if tag_type == 'stable' %}{% else %}Release{% endif %}{{ tag }}", projectName_depend: "Sherlock / Web Portal 2 / {% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Release {{ tag }}{% endif %}" }
+          - {id_depend: "SHERLOCK_Quickbooker_{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Release{{ tag }}{% endif %}_{% if tag == '45' %}{% else %}Quickbooker{% endif %}{{ dop_qb }}{{ tag }}", name_depend: "{{ dop_qb | default('Demo') }} {{ tag }}", artifact: "quickbooker", artifact_value: "quickbooker", projectId_depend: "SHERLOCK_Quickbooker_{% if tag_type == 'stable' %}{% else %}Release{% endif %}{{ tag }}", projectName_depend: "Sherlock / Quickbooker / {% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Release {{ tag }}{% endif %}" }
+          - {id_depend: "SHERLOCK_DriverPortal_{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Release{{ tag }}{% endif %}_DriverPortal{{ dop_dp }}", name_depend: "Driver Portal {{ dop_dp }}", artifact: "driverportal", artifact_value: "driverportal", projectId_depend: "SHERLOCK_DriverPortal_{% if tag_type == 'stable' %}{% else %}Release{% endif %}{{ tag }}", projectName_depend: "Sherlock / Driver Portal / Release {% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Release {{ tag }}{% endif %}" }
+        when: not(get_uri_xml|string|lower is search(item.id_depend|lower))
+
+      - name: uri add snapshot-dependencies
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/snapshot-dependencies'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: POST
+          body: '<snapshot-dependency id="{{ item.id_depend }}" type="snapshot_dependency"> \
+                 <properties> \
+                 <property name="run-build-if-dependency-failed" value="MAKE_FAILED_TO_START"/> \
+                 <property name="run-build-if-dependency-failed-to-start" value="MAKE_FAILED_TO_START"/> \
+                 <property name="run-build-on-the-same-agent" value="false"/> \
+                 <property name="take-started-build-with-same-revisions" value="true"/> \
+                 <property name="take-successful-builds-only" value="true"/> \
+                 </properties> \
+                 <source-buildType id="{{ item.id_depend }}"
+                 name="{{ item.name_depend }}"
+                 href="/httpAuth/app/rest/buildTypes/id:{{ item.id_depend }}"
+                 projectName="{{ item.projectName_depend }}" projectId="{{ item.projectId_depend }}"
+                 webUrl="https://teamcity-sherlock.haulmont.com/viewType.html?buildTypeId={{ item.id_depend }}"/> \
+                 </snapshot-dependency>'
+          headers:
+            Content-Type: "application/xml"
+          force_basic_auth: yes
+        ignore_errors: yes
+        with_items:
+          - {id_depend: "SHERLOCK_Product_Taxi{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag{{ tag }}{% endif %}_App", name_depend: "App", projectId_depend: "SHERLOCK_Product_Taxi{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag{{ tag }}{% endif %}", projectName_depend: "Sherlock / Taxi / Taxi ({% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag {{ tag }}{% endif %})" }
+          - {id_depend: "SHERLOCK_Product_Taxi{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag{{ tag }}{% endif %}_WebPortal", name_depend: "Web Portal", projectId_depend: "SHERLOCK_Product_Taxi{% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag{{ tag }}{% endif %}", projectName_depend: "Sherlock / Taxi / Taxi ({% if tag_type == 'stable' %}{{ tag_type|title }}{% else %}Tag {{ tag }}{% endif %})" }
+        when: not(get_uri_xml|string|lower is search(item.id_depend|lower))
+
+      - name: uri add or changes parameters
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/parameters'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: POST
+          body: '<property name="{{ item.env_name }}" value="{{ item.env_value }}"/>'
+          headers:
+            Content-Type: "application/xml"
+          force_basic_auth: yes
+        with_items:
+          - { env_name: "environmentName", env_value: "{{ build_name }}" }
+          - { env_name: "extensionName", env_value: "{{ extension }}" }
+          - { env_name: "minorVersion", env_value: "{{ tag }}" }
+          - { env_name: "serviceName", env_value: "{{ build_name }}-{{ tag_type }}{% if build_type is search('cluster') %}-cluster{% endif %}" }
+
+      - name: uri parameters additional for Stable
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/parameters'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: POST
+          body: '<property name="{{ item.env_name }}" value="{{ item.env_value }}"/>'
+          headers:
+            Content-Type: "application/xml"
+          force_basic_auth: yes
+        with_items:
+          - { env_name: "extensionBranch", env_value: "%minorVersion%" }
+          - { env_name: "svnLocalPath", env_value: "%extensionBranch%" }
+        when: find_project_id_xml is search(project_id) and tag_type == 'stable'
+
+      - name: uri set paused fot stable branch
+        uri:
+          url: 'https://teamcity-sherlock.haulmont.com/httpAuth/app/rest/buildTypes/{{ project_id }}/paused'
+          user: "{{ tc_login_user }}"
+          password: "{{ tc_login_password }}"
+          method: PUT
+          body: "true"
+          force_basic_auth: yes
+          headers:
+            Content-Type: "text/plain"
+        when: tag_type == 'stable'
+
+#      - name: create alias to webmin
+#        uri:
+#          url: "http://webmin.sherlock.com/"
+#          method: POST
+#          body-format: "form-urlencoded"
+#          body: "domain_name={{build_name}}-{{tag_type}}&proxy_pass=http://{{ vars['server_deploy_ip_'+inventory_hostname] }}:{{ vars['port_'+inventory_hostname] }}"
+#        run_once: true
+#        when: not(build_type is search('cluster'))
+
+  delegate_to: localhost
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: true
+
+#- fail:
+#    msg: "only teamcity"
+
+# install tomcat dir, filestorage, service
+- name: install test servers
+  block:
+    - name: check exist folder tomcat {{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}
+      stat:
+        path: "/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}"
+      register: tomcat_dir
+
+    - name: check exist folder _filestorage {{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}
+      stat:
+        path: "/home/haulmont/_filestorage/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}"
+      register: dir_filestorage
+
+    - name: check exist service file /etc/systemd/system/tomcat-{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}
+      stat:
+        path: "/etc/systemd/system/tomcat-{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}"
+      register: service
+
+#    - fail:
+#        msg: "tomcat_dir {{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %} EXISTS: {{ tomcat_dir.stat.exists }}; dir_filestorage EXIST: {{ dir_filestorage.stat.exists }}; systemd service EXIST: {{ service.stat.exists }}"
+#      when: tomcat_dir.stat.exists or dir_filestorage.stat.exists or service.stat.exists
+
+    - name: Create tomcat_dir and _filestorage
+      file:
+        path: "{{ item.path }}"
+        state: "{{ item.state }}"
+        owner: "{{ item.user }}"
+        group: "{{ item.user }}"
+        mode: "{{ item.mode }}"
+      with_items:
+        - { 'path': "/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}", 'user': "haulmont", 'mode': "0755", 'state': "directory" }
+        - { 'path': "/home/haulmont/_filestorage/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}", 'user': "haulmont", 'mode': "0755", 'state': "directory" }
+      when: not(tomcat_dir.stat.exists)
+
+    - name: Create systemd service tomcat-{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}
+      template:
+        src: "testservers_tomcat.service"
+        dest: "/etc/systemd/system/tomcat-{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}.service"
+      notify: reload daemon systemd
+
+#  delegate_to: "{{ item }}"
+  become: yes
+  when: build_type is search('default')
+
+#- fail:
+#    msg: "only dirs"
+
+# Create BD
+- name: create db for test servers
+  block:
+#
+#    - name: Get information
+#      subversion:
+#        repo: "svn://svn.haulmont.com/taxi/extensions/{{ extension }}/{% if tag == 'stable' %}{{ tag }}{% else %}tags/release_{{ tag }}{% endif %}/"
+#        dest: "roles/teamcity_create_build/files/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/ext"
+#        checkout: yes
+#
+#    - name: Get information gradle-common
+#      subversion:
+#        repo: "svn://svn.haulmont.com/taxi/gradle-common/{% if tag == 'stable' %}{{ tag }}{% else %}tags/release_{{ tag }}{% endif %}/"
+#        dest: "roles/teamcity_create_build/files/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/gradle-common"
+#        checkout: yes
+#
+#    - name: generate db localhost
+#      shell: |
+#        cd roles/teamcity_create_build/files/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/ext
+#        export HAULMONT_REPOSITORY_USER=developer
+#        export HAULMONT_REPOSITORY_PASSWORD=Haul2010
+#        bash gradlew createDb -PdbHost=localhost:5432 -PdbName={{ db_name }} --refresh-dependencies
+#
+#    - name: dump  db
+#      postgresql_db:
+#        name: "{{ db_name }}"
+#        login_user: "root"
+#        login_host: "localhost"
+#        login_password: "root"
+#        state: dump
+#        target: "roles/teamcity_create_build/files/{{ db_name }}.backup"
+#        target_opts: "-F c"
+#
+    - name: Create db "{{ db_name }}"
+      shell: |
+        PGPASSWORD="root" createdb -h {{ db_servers }} -U root -T template0 {{ db_name }}
+#        PGPASSWORD="root" pg_restore -h {{ db_servers }} -U root -d {{ db_name }} -Fc roles/teamcity_create_build/files/{{ db_name }}.backup
+
+  delegate_to: 127.0.0.1
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: True

@@ -1,0 +1,49 @@
+useNodeDaemon: true
+drainTimeoutMsec: 5000
+initStandbyTimeoutMin: 600
+serviceDbOptions:
+    dbName: {{ db_name }}
+    user: {{ db_user }}
+    password: {{ passwd_taxi.stdout }}
+
+datasources:
+{% for item_app in groups['appservers'] %}
+{% for tomcat in hostvars[item_app]['tomcats'] %}
+{% if tomcat.webapps is defined and ('allocator' in tomcat.webapps or 'app-core' in tomcat.webapps) %}
+{% if 'allocator' in tomcat.webapps %}
+{% set jmxport = tomcat.jmx_port %}
+{% set alias_app = customer+'-aa-'+item_app %}
+{% set context = 'allocator' %}
+- !ds
+    alias: {{ alias_app }}
+    host: {{ item_app }}
+    port: {{ jmxport }}
+    objectName: Catalina:type=DataSource,context=/{{ context }},host=localhost,class=javax.sql.DataSource,name="jdbc/CubaDS"
+    user: pgswitcher
+    password: {{ passwd_pgswitcher.stdout }}
+{% endif %}
+{% if 'app-core' in tomcat.webapps %}
+{% set jmxport = tomcat.jmx_port %}
+{% set alias_app = customer+'-'+item_app %}
+{% set context = 'app-core' %}
+- !ds
+    alias: {{ alias_app }}
+    host: {{ item_app }}
+    port: {{ jmxport }}
+    objectName: Catalina:type=DataSource,context=/{{ context }},host=localhost,class=javax.sql.DataSource,name="jdbc/CubaDS"
+    user: pgswitcher
+    password: {{ passwd_pgswitcher.stdout }}
+
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+
+postgresNodes:
+{% for host in groups['dbservers'] %}
+{% set alias_db = hostvars[ host ].db_server_alias | default(host) %}
+- !pg
+    alias: {{ alias_db }}
+    host: {{ host }}
+    clusterVersion: 9.6
+{% endfor %}

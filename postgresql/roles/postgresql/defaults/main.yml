@@ -1,0 +1,16 @@
+---
+# defaults vars
+defaults_hosts: dbservers
+user_host: "haulmont"
+
+list_app: "{{ ansible_play_hosts }}"
+list_db: "{{ groups['dbservers'] }}"
+
+sysctl_db:
+  - {'name': 'vm.swappiness', 'value': '0' }
+  - {'name': 'vm.overcommit_memory', 'value': '2' }
+
+sysctl_without_db:
+  - {'name': 'vm.swappiness', 'value': '5' }
+  - {'name': 'vm.overcommit_memory', 'value': '2' }
+  - {'name': 'vm.overcommit_ratio', 'value': '100' }

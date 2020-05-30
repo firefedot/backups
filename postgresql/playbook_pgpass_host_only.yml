@@ -1,0 +1,7 @@
+---
+- name: install postgresql
+  hosts: "{{ defaults_hosts }}"
+  become: yes
+
+  roles:
+    - {role: pgpass_host_only, note: "Generate .pgpass for hostel"}

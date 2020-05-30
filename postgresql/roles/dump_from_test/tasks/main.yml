@@ -1,0 +1,73 @@
+---
+# work only job lan network
+- name: name who run this
+  become: false
+  local_action: command whoami
+  register: user_localhost
+  run_once: True
+
+- name: get dump
+  block:
+    - name: get dump
+      shell: 'PGPASSWORD="root" pg_dump -h {{ test_db_server }} -Fp -U root -v --no-owner --no-privileges \
+              {{ test_db_name }} | bzip2 > roles/dump_from_test/files/{{ customer }}_backup.bz2'
+
+  delegate_to: 127.0.0.1
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: True
+
+- name: block restore db on master node
+  block:
+  - name: copy dump
+    copy:
+      src: "{{ customer }}_backup.bz2"
+      dest: "{{ home_path }}/_local_conf/{{ customer }}_backup.bz2"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+
+  - name: Create db "{{ db_name }}"
+    postgresql_db:
+      name: "{{ db_name }}"
+      encoding: UTF-8
+      template: template0
+      owner: "{{ db_user }}"
+    become_user: postgres
+
+  # uncomment after create DB
+  - name: Adds  extensions {{ ansible_date_time.time }}
+    postgresql_ext:
+      name: "{{ item }}"
+      db: "{{ db_name }}"
+      login_host: "localhost"
+      login_user: "{{ db_user }}"
+    with_items:
+      - pg_buffercache
+      - pg_stat_statements
+    become_user: "{{ sherlock_user }}"
+
+  - name: collect facts for update time
+    setup:
+
+  - name: restore db {{ ansible_date_time.time }}
+    shell: "bzcat {{ home_path }}/_local_conf/{{ customer }}_backup.bz2 | psql -h localhost -d {{ db_name }} -U {{ db_user }}"
+    become_user: "{{ sherlock_user }}"
+
+  - name: set time zone to db
+    postgresql_query:
+      db: "{{ db_name }}"
+      login_host: "localhost"
+      login_user: "{{ db_user }}"
+      query: "alter database {{ db_name }} set time zone '{{ customer_timezone | default(server_timezone) }}';"
+    become_user: "{{ sherlock_user }}"
+  when: db_master is defined
+
+- name: collect facts for update time
+  setup:
+
+- name: clear tmp files {{ ansible_date_time.time }}
+  file:
+    path: "roles/dump_from_test/files/{{ customer }}_backup.bz2"
+    state: absent
+  delegate_to: 127.0.0.1
+  become_user: "{{ user_localhost.stdout }}"
+  run_once: True

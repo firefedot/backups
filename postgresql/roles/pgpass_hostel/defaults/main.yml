@@ -1,0 +1,5 @@
+---
+# defaults vars
+defaults_hosts: "all"
+list_app: "{{ groups['appservers'] }}"
+list_db: "{{ groups['dbservers'] }}"

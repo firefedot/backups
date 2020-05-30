@@ -1,0 +1,65 @@
+---
+
+- set_fact:
+    rc: "/etc/rc.local"
+    rc_service: "/etc/systemd/system/rc-local.service"
+
+- name: search {{ rc }} for template "{{ note }}"
+  stat:
+    path: "{{ rc }}"
+  register: rc_exists
+
+- name: search {{ rc_service }} for template "{{ note }}"
+  stat:
+    path: "{{ rc_service }}"
+  register: rc_service_exists
+
+- name: search {{ rc }} for template "{{ note }}"
+  stat:
+    path: "{{ rc }}"
+  register: rc_exists
+
+- debug:
+    var : rc_exists.stat.exists
+
+- name: add {{ rc }} for "{{ note }}"
+  copy:
+    src: "../../_scripts/rc.local"
+    dest: "{{ rc }}"
+    owner: root
+    group: root
+    mode: u=xrw,g=xr,o=xr
+    backup: yes
+  when: not rc_exists.stat.exists
+
+- name: add {{ rc_service }} for "{{ note }}"
+  copy:
+    src: "../../_scripts/rc-local.service"
+    dest: "{{ rc_service }}"
+    owner: root
+    group: root
+    mode: u=rw,g=r,o=r
+    backup: yes
+  when: not rc_service_exists.stat.exists
+
+- name: read rc.local {{ note }}
+  shell: cat {{ rc }} | grep {{ string_scripts }}
+  register: outrc
+  failed_when: outrc.rc != 1 and outrc.rc != 0
+
+- name: insert script im {{ rc }} {{ note }}
+  lineinfile:
+    path: "{{ rc }}"
+    state: present
+    insertbefore: '^exit 0'
+    line: "{{ script }}"
+  when: 'string_scripts not in outrc.stdout'
+
+- name: enable {{ rc_service }} {{ note }}
+  systemd:
+    name: rc-local
+    enabled: yes
+
+- name: reload systemd {{ note }}
+  systemd:
+    daemon_reload: yes

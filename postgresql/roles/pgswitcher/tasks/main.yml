@@ -1,0 +1,301 @@
+---
+# install and settings pgswitcher
+
+- set_fact:
+    list_web: "{{ list_web|default([]) + [{ 'app': item, 'list_apps': hostvars[ item ].tomcats | map (attribute='name') | list }] }}"
+  with_items:
+    - "{{ groups['appservers'] }}"
+
+- debug:
+    msg: |
+      {{ hostvars[ item.0.app ].tomcats | selectattr('name','equalto',item.1) | map (attribute='webapps') | list | first | list | join(',')}}
+      {% set webs = "['" + hostvars[ item.0.app ].tomcats | selectattr('name','equalto',item.1) | map (attribute='webapps') | list | first | list | join("','") + "']"%}
+      {{ webs }}
+  with_subelements:
+    - "{{ list_web }}"
+    - list_apps
+
+- name: Block for master or single server
+  block:
+  - name: copy passwd if not copy before
+    block:
+    - name: copy passwd if external db exist
+      shell: "scp -r {{ home_path }}/_local_conf/passwd {{ item }}:{{ home_path }}/_local_conf/"
+      become_user: "{{ sherlock_user }}"
+      with_items: "{{ groups['appservers'] }}"
+    when: "'dbservers' in group_names"
+
+  # add pgswitcher into jmxremote
+  - name: passwd, jmx for appservers only
+    block:
+    - name: get passwg for pgswitcher
+      shell: "cat {{ home_path }}/_local_conf/passwd/psql_pgswitcher"
+      register: passwd_pgswitcher
+
+    - name: get passwg for pgswitcher
+      shell: "cat {{ home_path }}/_local_conf/passwd/psql_taxi"
+      register: passwd_taxi
+
+    - name: create jmxremote files
+      file:
+        path: "{{ item.path }}"
+        state: "{{ item.state }}"
+        owner: "{{ sherlock_user }}"
+        group: "{{ sherlock_user }}"
+        mode: "{{ item.mode }}"
+      with_list:
+        - { path: "{{ home_path }}/_local_conf/jmx", mode: "0755", state: "directory" }
+        - { path: "{{ home_path }}/_local_conf/jmx/jmxremote.access", mode: "0600", state: "touch" }
+        - { path: "{{ home_path }}/_local_conf/jmx/jmxremote.password", mode: "0600", state: "touch" }
+
+    - name: find line in to jmxremote
+      shell: "grep 'pgswitcher' {{ home_path }}/_local_conf/jmx/jmxremote.password | awk '{print $2}'"
+      register: jmx
+      failed_when: jmx.rc != 1 and jmx.rc !=0
+
+    - name: instert need lines into jmxremote
+      lineinfile:
+        path: "{{ home_path }}/_local_conf/{{ item.path }}"
+        line: "{{ item.line }}"
+      with_items:
+        - { path: "jmx/jmxremote.access", line: 'pgswitcher readwrite' }
+        - { path: "jmx/jmxremote.password", line: "pgswitcher {{ passwd_pgswitcher.stdout }}" }
+      when: jmx.stdout == ""
+      no_log: true
+    when: "'appservers' in group_names"
+
+  # install soft
+
+  - name: install soft
+    apt:
+      update_cache: yes
+      name:
+        - jsvc
+        - openjdk-8-jre-headless
+      force_apt_get: yes
+  when: type_servers != 'hostel'
+
+#
+- name: block run if exist external db servers
+  block:
+  - name: Add an Apt signing key
+    apt_key:
+      url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+      state: present
+
+  - apt_repository:
+          repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_lsb.codename }}-pgdg main"
+          state: present
+  - name: install psql client
+    apt:
+      update_cache: yes
+      name:
+        - postgresql-client-9.6
+      force_apt_get: yes
+  when: "'appservers' in group_names and groups['dbservers'] | join(',') is search('db') and type_servers != 'hostel'"
+
+- name: test exists _local_conf
+  file:
+    path: "{{ home_path }}/_tmp"
+    state: directory
+    owner: "{{ sherlock_user }}"
+    group: "{{ sherlock_user }}"
+    mode: '0755'
+
+- name: copy and install pgswitcher on dbservers
+  block:
+  - name: mkdir /etc/postgresql/9.6/main/restore
+    file:
+      path: "{{ item.path }}"
+      state: "{{ item.state }}"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+      mode: "{{ item.mode }}"
+    with_items:
+      - { path: "/etc/postgresql/9.6/main/restore", mode: "0755", state: "directory", owner: "postgres", group: "postgres" }
+
+  - name: copy pgswitcher
+    copy:
+      src: "pgswitcher-node-1.2.3.deb"
+      dest: "{{ home_path }}/_tmp/pgswitcher-node-1.2.3.deb"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+
+  - name: Install .deb package
+    apt:
+      deb: "{{ home_path }}/_tmp/pgswitcher-node-1.2.3.deb"
+      force_apt_get: yes
+  when: "'dbservers' in group_names and type_servers != 'hostel'"
+
+# manage pgswitcher
+
+# generate list ip and hosts
+- name: pgswitcher node only dbservers
+  block:
+  - name: copy node-daemon config
+    template:
+      src: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: "{{ item.owner }}"
+      group: "{{ item.group }}"
+    with_items:
+      - { src: "node-daemon.properties", dest: "/etc/pgswitcher/node-daemon.properties", owner: "root", group: "root" }
+      - { src: "recovery.conf", dest: "/etc/postgresql/9.6/main/restore/recovery.conf", owner: "postgres", group: "postgres" }
+
+  - name: restart pgswitcher-node
+    service:
+      name: pgswitcher-node
+      state: restarted
+
+  - name: tail log pgswitcher
+    shell: "tail -n 50 /var/log/pgswitcher/node-daemon.log | grep Initializing -A 3"
+    register: pg_log
+    failed_when: pg_log.rc != 1 and pg_log.rc !=0
+
+  - name: check process pgswitcher
+    shell: "ps ax | grep node-daemon -c"
+    register: ps_log
+    failed_when: ps_log.rc != 1 and ps_log.rc !=0
+
+  - name: analyse logs
+    debug:
+      msg: "{{ pg_log.stdout_lines }}"
+  #  failed_when: pg_log.rc == 1
+
+  - name: analyse ps aux
+    debug:
+      msg: "Service started"
+    failed_when: ps_log.stdout is search("1") or ps_log.stdout is search("0") or ps_log.rc != 0
+  when: "'dbservers' in group_names and type_servers != 'hostel'"
+
+- name: test telnet from appservers pgswitcher-cli
+  block:
+    - name: check telnet db1
+      shell: "( echo open db1 5440 ; sleep 2; echo healthcheck; sleep 2; echo exit) | telnet"
+      register: telnet1
+      failed_when: telnet1.rc != 1 and telnet1.rc !=0
+
+    - name: check telnet db2
+      shell: "( echo open db2 5440 ; sleep 2; echo healthcheck; sleep 2; echo exit) | telnet"
+      register: telnet2
+      failed_when: telnet2.rc != 1 and telnet2.rc !=0
+
+    - name: analise telnet
+      debug:
+        msg: "{{ telnet1.stdout }} {{ telnet2.stdout }}"
+      failed_when: telnet1.stdout is not search("OK") and telnet2.stdout is not search("OK")
+  when: "'appservers' in group_names and type_servers != 'hostel'"
+
+- name: pgswitcher-cli only appservers
+  block:
+  - name: copy pgswitcher-cli
+    copy:
+      src: "pgswitcher-cli-1.2.3.deb"
+      dest: "{{ home_path }}/_tmp/pgswitcher-cli-1.2.3.deb"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+
+  - name: Install cli .deb package
+    apt:
+      deb: "{{ home_path }}/_tmp/pgswitcher-cli-1.2.3.deb"
+      force_apt_get: yes
+
+  - name: copy config.yaml
+    template:
+      src: config.yaml
+      dest: "/etc/pgswitcher/config.yaml"
+      owner: "{{ sherlock_user }}"
+      group: "{{ group_sherlock|default('haulmont') }}"
+      mode: 0660
+  when: "'appservers' in group_names and type_servers != 'hostel'"
+
+#- debug:
+#    var: hostvars['app1']
+- name: Only hostel member
+  block:
+  - name: get passwd for pgswitcher
+    shell: "cat {{ home_path }}/_local_conf/passwd/psql_pgswitcher"
+    register: passwd_pgswitcher
+    failed_when: passwd_pgswitcher.rc != 1 and passwd_pgswitcher.rc != 0
+
+  - debug:
+      msg: "{{passwd_pgswitcher.stdout}}"
+
+  - name: get passwd pgswitcher if non passwd dir
+    shell: "grep pgswitcher {{master_hostel_home_dir}}/_local_conf/jmx/jmxremote.password | cut -d' ' -f2"
+    register: passwd_pgswitcher_new
+    failed_when: passwd_pgswitcher_new.rc != 1 and passwd_pgswitcher_new.rc != 0
+    when: passwd_pgswitcher.rc != 0
+
+  - debug:
+      msg: "{{passwd_pgswitcher.stdout}}"
+
+  - name: check balancer-{{ customer }}
+    shell: "grep '{{ customer }}-app1' /etc/pgswitcher/config.yaml"
+    register: config
+    failed_when: config.rc != 1 and config.rc != 0
+
+  - name: create jmxremote files
+    file:
+      path: "{{ item.path }}"
+      state: "{{ item.state }}"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+      mode: "{{ item.mode }}"
+    with_list:
+      - { path: "{{ home_path }}/_local_conf/jmx", mode: "0755", state: "directory" }
+      - { path: "{{ home_path }}/_local_conf/jmx/jmxremote.access", mode: "0600", state: "touch" }
+      - { path: "{{ home_path }}/_local_conf/jmx/jmxremote.password", mode: "0600", state: "touch" }
+
+  - name: find line in to jmxremote
+    shell: "grep 'pgswitcher' {{ home_path }}/_local_conf/jmx/jmxremote.password | awk '{print $2}'"
+    register: jmx
+    failed_when: jmx.rc != 1 and jmx.rc !=0
+
+  - name: instert need lines into jmxremote for hostel
+    lineinfile:
+      path: "{{ home_path }}/_local_conf/{{ item.path }}"
+      line: "{{ item.line }}"
+    with_items:
+      - { path: "jmx/jmxremote.access", line: 'pgswitcher readwrite' }
+      - { path: "jmx/jmxremote.password", line: "pgswitcher {{ passwd_pgswitcher.stdout | default (passwd_pgswitcher_new.stdout)}}" }
+    when: 'jmx.stdout is search("")'
+
+  - name: insert ds to pgswitcher config.yaml
+    lineinfile:
+      path: "/etc/pgswitcher/config.yaml"
+      insertafter: '^datasources:'
+      line: |
+        {% for item_app in groups['appservers'] -%}
+        {% for tomcat in hostvars[item_app]['tomcats'] %}
+        {% if tomcat.webapps is defined and ('allocator' in tomcat.webapps or 'app-core' in tomcat.webapps) %}
+        {% if 'allocator' in tomcat.webapps %}
+        {% set jmxport = tomcat.jmx_port %}
+        {% set alias_app = customer+'-aa-'+item_app %}
+        {% set context = 'allocator' %}
+        - !ds
+            alias: {{ alias_app }}
+            host: {{ item_app }}
+            port: {{ jmxport }}
+            objectName: Catalina:type=DataSource,context=/{{ context }},host=localhost,class=javax.sql.DataSource,name="jdbc/CubaDS"
+            user: pgswitcher
+            password: {{ passwd_pgswitcher.stdout }}
+        {% endif -%}
+        {% if 'app-core' in tomcat.webapps %}
+        {% set jmxport = tomcat.jmx_port %}
+        {% set alias_app = customer+'-'+item_app %}
+        {% set context = 'app-core' %}
+        - !ds
+            alias: {{ alias_app }}
+            host: {{ item_app }}
+            port: {{ jmxport }}
+            objectName: Catalina:type=DataSource,context=/{{ context }},host=localhost,class=javax.sql.DataSource,name="jdbc/CubaDS"
+            user: pgswitcher
+            password: {{ passwd_pgswitcher.stdout }}
+
+        {% endif -%}
+        {% endif -%}
+        {% endfor -%}
+        {% endfor -%}
+    when: not (config.stdout is search(customer+"-app1"))
+  when: type_servers == 'hostel' and "'appservers' in group_names"

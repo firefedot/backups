@@ -1,0 +1,7 @@
+---
+- name: install postgresql
+  hosts: "{{ defaults_hosts }}"
+  become: yes
+
+  roles:
+    - {role: after_tunning_jmx, note: "after_tunning_jmx"}

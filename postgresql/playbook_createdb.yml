@@ -1,0 +1,8 @@
+---
+- name: create and restore new db
+  hosts: "{{ defaults_hosts }}"
+  become: yes
+
+  roles:
+    - { role: createdb, note: "createdb", when: test_db_server is not defined }
+    - { role: dump_from_test, note: "dump_from_test", when: test_db_server is defined }

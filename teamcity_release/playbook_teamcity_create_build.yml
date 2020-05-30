@@ -1,0 +1,8 @@
+---
+- name: Create Teamcity Build
+  hosts: "{{ defaults_hosts }}"
+  gather_facts: no
+  any_errors_fatal: true
+
+  roles:
+    - {role: teamcity_create_build, note: "Create Teamcity Build"}

@@ -1,0 +1,27 @@
+[Unit]
+Description=Tomcat {{build_name | title }} {{tag_type | title }}{% if build_type is search('cluster') %} Cluster
+{% endif %}
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/bin/catalina.pid
+
+Environment=JAVA_HOME=/usr/lib/jvm/java-8-oracle
+Environment=CATALINA_PID=/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/bin/catalina.pid
+
+WorkingDirectory=/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}
+
+ExecStart=/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/bin/startup-systemd.sh
+ExecStartPost=/bin/sleep 5
+
+ExecStop=/home/tomcat7/{{build_name}}-{{tag_type}}{% if build_type is search('cluster') %}-cluster{% endif %}/bin/catalina.sh stop 10 -force
+
+User=haulmont
+Group=haulmont
+
+Restart=on-abort
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

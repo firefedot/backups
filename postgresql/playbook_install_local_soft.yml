@@ -1,0 +1,9 @@
+---
+- name: install soft for generate db
+  hosts: localhost
+  connection: local
+  become_user: {"{ localuser}}"
+  become: yes
+
+  roles:
+    - {role: install_local_soft, note: "install_local_soft"}

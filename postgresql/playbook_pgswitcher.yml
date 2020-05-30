@@ -1,0 +1,7 @@
+---
+- name: pgswitcher
+  hosts: "{{ defaults_hosts }}"
+  become: yes
+
+  roles:
+    - {role: pgswitcher, note: "pgswitcher"}

@@ -1,0 +1,251 @@
+---
+# tasks postgresql install/deploy
+#
+- name: only single server or master hostel
+  block:
+  - name: Add an Apt signing key
+    apt_key:
+      url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+      state: present
+
+  - apt_repository:
+          repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_lsb.codename }}-pgdg main"
+          state: present
+  #
+  - name: Update repositories cache
+    apt:
+      update_cache: yes
+      force_apt_get: yes
+
+  - name: Install postgresql package
+    apt:
+      name:
+        - postgresql-9.6
+        - postgresql-contrib-9.6
+        - libpq-dev
+        - python3-psycopg2
+        - python-psycopg2
+      force_apt_get: yes
+#
+  - name: test exists _local_conf
+    file:
+      path: "{{ home_path }}/_local_conf/passwd"
+      state: directory
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+      mode: '0755'
+
+  - name: detect passwd
+    stat:
+      path: "{{ home_path }}/_local_conf/passwd/psql_{{ db_user }}"
+    register: psql_db_user
+  when: type_servers != 'hostel'
+
+
+# block run if not exist passwd-file on remote server
+- name: block generate and copy
+  block:
+  - name: Generate password
+    set_fact:
+      user_pass_psql: "{{ lookup ('password', 'roles/postgresql/files/' + customer + '/' + 'psql_' + db_user + ' length=10 chars=ascii_letters,digits') }}"
+      user_pass_jdbc: "{{ lookup ('password', 'roles/postgresql/files/' + customer + '/' + 'psql_jdbcproxy' + ' length=10 chars=ascii_letters,digits') }}"
+      user_pass_pgswitcher: "{{ lookup ('password', 'roles/postgresql/files/' + customer + '/' + 'psql_pgswitcher' + ' length=10 chars=ascii_letters,digits') }}"
+
+  - name: copy passwd
+    copy:
+      src: "{{ customer }}/{{ item }}"
+      dest: "{{ home_path }}/_local_conf/passwd/{{ item }}"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+      mode: '0600'
+    with_items:
+      - "psql_{{ db_user }}"
+      - "psql_jdbcproxy"
+      - "psql_pgswitcher"
+
+  - name: Copy passwd on apssservers if external db exist
+    shell: "scp -r {{ home_path }}/_local_conf/passwd {{ item }}:{{ home_path }}/_local_conf/passwd"
+    become_user: "{{ sherlock_user }}"
+    with_items: "{{ groups['appservers'] }}"
+    when: "groups['dbservers'] | join(',') is search('db')"
+
+  - name: Create "{{ user_db }}" SUPERUSER
+    postgresql_user:
+      db: postgres
+      name: "{{ db_user }}"
+      password: "{{ user_pass_psql }}"
+      role_attr_flags: SUPERUSER
+      priv: ALL
+      state: present
+      encrypted: yes
+    become_user: postgres
+
+  - name: Create {{ jdbcproxy_user | default("jdbcproxy") }} for db
+    postgresql_user:
+      db: postgres
+      name: "{{ jdbcproxy_user | default('jdbcproxy') }}"
+      password: "{{ user_pass_jdbc }}"
+      state: present
+      encrypted: yes
+    become_user: postgres
+
+  - name: Create replicator user
+    postgresql_user:
+      db: postgres
+      name: replicator
+      role_attr_flags: REPLICATION
+      state: present
+      encrypted: yes
+    become_user: postgres
+
+  - name: Create secure file .pgpass
+    template:
+      src: ".pgpass"
+      dest: "/home/{{ sherlock_user }}/.pgpass"
+      owner: "{{ sherlock_user }}"
+      group: "{{ sherlock_user }}"
+      mode: '0600'
+    #
+  - name: Insert data in .pgpass
+    lineinfile:
+      path: "/home/{{ sherlock_user }}/.pgpass"
+      state: present
+      line: |-
+        {{ item }}:5432:{{ db_name }}:{{ db_user }}:{{ user_pass_psql }}
+    with_items:
+      - "localhost"
+      - "{{ list_db }}"
+
+  # get only string about dbservers
+  - name: Copy .pgpass if external db exist
+    shell: ssh {{ item }} -C 'ssh db1 -C "grep db[[:digit:]] .pgpass" > /home/{{ sherlock_user }}/.pgpass && chmod 600 /home/{{ sherlock_user }}/.pgpass'
+    become_user: "{{ sherlock_user }}"
+    with_items: "{{ groups['appservers'] }}"
+    when: "groups['dbservers'] | join(',') is search('db')"
+    run_once: true
+
+  when: type_servers != 'hostel' and not psql_db_user.stat.exists
+
+- name: Block for Single server and Hostel master
+  block:
+  - name: detect device for /var/lib/postgresql
+    shell: 'df  /var/lib/postgresql | grep "dev"| cut -d " " -f1'
+    register: read_ahead
+
+  - name: read_ahead insert to rc.local {{ note }}
+    include_tasks: rc_local.yml
+    vars:
+      string_scripts: "blockdev"
+      script: "blockdev --setra 16384 {{ read_ahead.stdout }}"
+
+  # systcl without external db servers
+  - sysctl:
+      name: "{{ item.name }}"
+      value: "{{ item.value }}"
+      state: present
+      sysctl_set: yes
+      reload: yes
+    with_items: "{{ sysctl_without_db }}"
+    when: inventory_hostname is search("app")
+
+  # systcl with external db server
+  - sysctl:
+      name: "{{ item.name }}"
+      value: "{{ item.value }}"
+      state: present
+      sysctl_set: yes
+      reload: yes
+    with_items: "{{ sysctl_without_db }}"
+    when: inventory_hostname is search("db")
+
+  # create empty vars for next job
+  - set_fact:
+      ip_for_hosts: []
+
+  - set_fact:
+      ip_for_hosts: "{{ ip_for_hosts + [ {'node': item, 'ip_address': hostvars[ item ].internal_interface_ip | default(hostvars[ item ].ansible_host) } ] }}"
+    with_items:
+      - "{{ groups['all'] }}"
+
+  - debug:
+      msg: "{{ ip_for_hosts }}"
+  #
+  - name: check RAM
+    shell: "free -h | grep -i mem| awk '{print $2}' | rev | cut -c 2- | rev"
+    register: ram
+
+  - name: detect device on /var/lib/postgresql for conf
+    shell: 'df  /var/lib/postgresql | grep "dev"| cut -d " " -f1 | cut -d "/" -f3 | cut -c -3'
+    register: read_ahead_full
+
+  - name: check ssd or hdd
+    shell: "cat /sys/block/{{ read_ahead_full.stdout }}/queue/rotational"
+    register: hdd
+
+  - name: count raid diskd
+    shell: "hpacucli ctrl all show config | grep physicaldrive -c"
+    register: count_raid
+    failed_when: count_raid.rc !=1 and count_raid.rc != 0
+
+  - debug:
+      msg: "no SSD - count_raid = {{ count_raid.stdout }}"
+    when: hdd.stdout != 0
+
+  - name: config postgresql pg_hba
+    template:
+      src: pg_hba.j2
+      dest: "/etc/postgresql/9.6/main/pg_hba.conf"
+      owner: postgres
+      group: postgres
+      mode: 0640
+    notify: pg_ctlcluster 9.6 main restart
+
+  - name: config postgresql mini ram
+    template:
+      src: postgres_16.conf
+      dest: "/etc/postgresql/9.6/main/conf.d/postgres_add.conf"
+      owner: postgres
+      group: postgres
+      mode: 0644
+      backup: yes
+    when: ram.stdout < "64"
+    notify: pg_ctlcluster 9.6 main restart
+
+  - name: config postgresql maxi ram
+    template:
+      src: postgres_64.conf
+      dest: "/etc/postgresql/9.6/main/conf.d/postgres_add.conf"
+      owner: postgres
+      group: postgres
+      mode: 0644
+      backup: yes
+    when: ram.stdout >= "64"
+    notify: pg_ctlcluster 9.6 main restart
+  when: type_servers != 'hostel'
+
+- name: for hostel minion
+  block:
+    - name: get .pgpass
+      shell: |
+          cp "/"`ls -la /home/*/.pgpass | cut -d"/" -f2- | tail -n 1` {{ home_path }}/pgpass
+          grep monitoring {{ home_path }}/pgpass | sed -e 's/[^:]*[^:]/monitoring_{{ customer }}/3' > {{ home_path }}/.pgpass
+          grep -v monitoring {{ home_path }}/pgpass | sed -e 's/[^:]*[^:]/{{ db_name }}/3' >> {{ home_path }}/.pgpass
+          chown {{ sherlock_user }}:{{ sherlock_user }} {{ home_path }}/.pgpass
+          chmod 600 {{ home_path }}/.pgpass
+          chown -R {{ sherlock_user }}:{{ sherlock_user }} {{ home_path }}/_local_conf/
+#           cp -r /home/{{ master_hostel_user }}/_local_conf/passwd {{ home_path }}/_local_conf/
+    # get only string about dbservers
+    - name: Copy .pgpass if external db exist
+      shell: ssh {{ item }} -C 'mkdir -p {{ home_path }}/_local_conf/passwd && ssh db1 -C "grep db[[:digit:]] .pgpass" > /home/{{ sherlock_user }}/.pgpass && chmod 600 /home/{{ sherlock_user }}/.pgpass'
+      become_user: "{{ sherlock_user }}"
+      with_items: "{{ groups['appservers'] }}"
+      when: "groups['dbservers'] | join(',') is search('db')"
+      run_once: true
+
+    - name: Copy passwd if hostel use
+      shell: rsync -avz --progress {{ home_path }}/_local_conf/passwd/ {{ item }}:{{ home_path }}/_local_conf/passwd/
+      with_items: "{{ groups['appservers'] }}"
+      become_user: "{{ sherlock_user }}"
+      when: "groups['dbservers'] | join(',') is search('db')"
+      run_once: true
+  when: type_servers == 'hostel'

@@ -1,0 +1,6 @@
+---
+# restarting services
+- name: pg_ctlcluster 9.6 main restart
+  service:
+    name: postgresql
+    state: restarted

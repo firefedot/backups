@@ -1,0 +1,28 @@
+---
+# thi task for hostel only
+- name: for hostel minion
+  block:
+    - name: get .pgpass
+      shell: |
+          cp "/"`ls -la /home/*/.pgpass | cut -d"/" -f2- | tail -n 1` {{ home_path }}/pgpass
+          grep monitoring {{ home_path }}/pgpass | sed -e 's/[^:]*[^:]/monitoring_{{ customer }}/3' > {{ home_path }}/.pgpass
+          grep -v monitoring {{ home_path }}/pgpass | sed -e 's/[^:]*[^:]/{{ db_name }}/3' >> {{ home_path }}/.pgpass
+          chown {{ sherlock_user }}:{{ sherlock_user }} {{ home_path }}/.pgpass
+          chmod 600 {{ home_path }}/.pgpass
+          chown -R {{ sherlock_user }}:{{ sherlock_user }} {{ home_path }}/_local_conf/
+#           cp -r /home/{{ master_hostel_user }}/_local_conf/passwd {{ home_path }}/_local_conf/
+    # get only string about dbservers
+    - name: Copy .pgpass if external db exist
+      shell: ssh {{ item }} -C 'mkdir -p {{ home_path }}/_local_conf/passwd && ssh db1 -C "grep db[[:digit:]] .pgpass" > /home/{{ sherlock_user }}/.pgpass && chmod 600 /home/{{ sherlock_user }}/.pgpass'
+      become_user: "{{ sherlock_user }}"
+      with_items: "{{ groups['appservers'] }}"
+      when: "groups['dbservers'] | join(',') is search('db')"
+      run_once: true
+
+    - name: Copy passwd if hostel use
+      shell: rsync -avz --progress {{ home_path }}/_local_conf/passwd/ {{ item }}:{{ home_path }}/_local_conf/passwd/
+      with_items: "{{ groups['appservers'] }}"
+      become_user: "{{ sherlock_user }}"
+      when: "groups['dbservers'] | join(',') is search('db')"
+      run_once: true
+  when: type_servers == 'hostel'

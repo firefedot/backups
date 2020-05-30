@@ -1,0 +1,4 @@
+---
+# defaults vars
+defaults_hosts: dbservers
+
